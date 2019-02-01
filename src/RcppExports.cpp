@@ -5,16 +5,6 @@
 
 using namespace Rcpp;
 
-// rcpp_hello
-List rcpp_hello();
-RcppExport SEXP _RcppSqEM_rcpp_hello() {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    rcpp_result_gen = Rcpp::wrap(rcpp_hello());
-    return rcpp_result_gen;
-END_RCPP
-}
 // squarem1_cpp
 Rcpp::List squarem1_cpp(Rcpp::NumericVector par, SEXP fixptfn, SEXP objfn, const Rcpp::List& ctrl, SEXP env);
 RcppExport SEXP _RcppSqEM_squarem1_cpp(SEXP parSEXP, SEXP fixptfnSEXP, SEXP objfnSEXP, SEXP ctrlSEXP, SEXP envSEXP) {
@@ -30,10 +20,24 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// squarem2_cpp
+Rcpp::List squarem2_cpp(Rcpp::NumericVector par, SEXP fixptfn, const Rcpp::List& ctrl, SEXP env);
+RcppExport SEXP _RcppSqEM_squarem2_cpp(SEXP parSEXP, SEXP fixptfnSEXP, SEXP ctrlSEXP, SEXP envSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type par(parSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type fixptfn(fixptfnSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type ctrl(ctrlSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type env(envSEXP);
+    rcpp_result_gen = Rcpp::wrap(squarem2_cpp(par, fixptfn, ctrl, env));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_RcppSqEM_rcpp_hello", (DL_FUNC) &_RcppSqEM_rcpp_hello, 0},
     {"_RcppSqEM_squarem1_cpp", (DL_FUNC) &_RcppSqEM_squarem1_cpp, 5},
+    {"_RcppSqEM_squarem2_cpp", (DL_FUNC) &_RcppSqEM_squarem2_cpp, 4},
     {NULL, NULL, 0}
 };
 

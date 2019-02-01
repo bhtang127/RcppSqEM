@@ -2,13 +2,14 @@
 // Author: Bohao Tang, Ravi Varadhan
 
 #include <Rcpp.h>
+#include <cmath>
 
 // useful class for function evaluation
 // motivated by RcppDE
 class EvalBase {
 public:
-    EvalBase(const std::string fname_) : neval(0), fname(fname_) {};
-    virtual double eval(SEXP par) = 0;
+    EvalBase() : neval(0) {};
+    virtual Rcpp::NumericVector eval(SEXP par) = 0;
     unsigned long getNumEvals() { return neval; }
 protected:
     unsigned long int neval;
@@ -17,7 +18,7 @@ protected:
 
 class EvalR : public EvalBase {
 public:
-    EvalR(SEXP fcall_, SEXP env_) : fcall(fcall_), env(env_) {} 
+    EvalR(SEXP fcall_, SEXP env_) : fcall(fcall_), env(env_) {}
     Rcpp::NumericVector eval(SEXP par) {
         neval++;
         return defaultfn(par);
@@ -28,14 +29,14 @@ private:
         try {
             SEXP fn = ::Rf_lang3(fcall, par, R_DotsSymbol); // this could be done with Rcpp
             SEXP res = ::Rf_eval(fn, env);                  // but is still a lot slower right now
-            return(res); 
-        } catch(std::exception &ex) {	
+            return(res);
+        } catch(std::exception &ex) {
             forward_exception_to_r(ex);
-        } catch(...) { 
+        } catch(...) {
             const std::string err = fname + "Function Evaluation Error (Unknown Reason)";
-            ::Rf_error(err.c_str()); 
+            ::Rf_error(err.c_str());
         }
-        return NA_REAL; 
+        return NA_REAL;
     }
 };
 
@@ -55,7 +56,7 @@ public:
         funptr = *(xptr);
         env = env_;
     };
-    double eval(SEXP par) {
+    Rcpp::NumericVector eval(SEXP par) {
         neval++;
         return funptr(par, env);
     }
@@ -64,139 +65,262 @@ private:
     SEXP env;
 };
 
+// useful function
+bool any_naC(Rcpp::NumericVector x) {
+  return Rcpp::is_true(Rcpp::any(Rcpp::is_na(x)));
+}
+
 // [[Rcpp::export]]
-Rcpp::List squarem1_cpp(Rcpp::NumericVector par, 
+Rcpp::List squarem1_cpp(Rcpp::NumericVector par,
                         SEXP fixptfn, SEXP objfn,
                         const Rcpp::List & ctrl,
                         SEXP env) {
 
-#if RCPP_DEV_VERSION >= RcppDevVersion(0,12,17,1)
-    Rcpp::SuspendRNGSynchronizationScope rngScope;
-#endif
+  int method            = Rcpp::as<int>(ctrl["method"]);
+  unsigned long maxiter = Rcpp::as<unsigned long>(ctrl["maxiter"]);
+  double tol            = Rcpp::as<double>(ctrl["tol"]);
+  double step_min       = Rcpp::as<double>(ctrl["step.min0"]);
+  double step_max0      = Rcpp::as<double>(ctrl["step.max0"]);
+  double step_max       = Rcpp::as<double>(ctrl["step.max0"]);
+  double mstep          = Rcpp::as<double>(ctrl["mstep"]);
+  double objfn_inc      = Rcpp::as<double>(ctrl["objfn.inc"]);
+  int trace             = Rcpp::as<int>(ctrl["trace"]);
+  int intermed          = Rcpp::as<int>(ctrl["intermed"]);
+  int np                = par.size();
 
-    int method       = Rcpp::as<int>(ctrl["method"]);
-    int maxiter      = Rcpp::as<int>(ctrl["maxiter"]);
-    double tol       = Rcpp::as<double>(ctrl["tol"]);
-    double step.min  = Rcpp::as<double>(ctrl["step.min0"]);
-    double step.max0 = Rcpp::as<double>(ctrl["step.max0"]);
-    double step.max  = Rcpp::as<double>(ctrl["step.max0"]);
-    double mstep     = Rcpp::as<double>(ctrl["mstep"]);
-    double objfn.inc = Rcpp::as<double>(ctrl["objfn.inc"]);
-    int trace        = Rcpp::as<int>(ctrl["trace"]);
-    int intermed     = Rcpp::as<int>(ctrl["intermed"]);
-    int np           = par.size();
+  EvalBase *fn = NULL;
+  if (TYPEOF(fixptfn) == EXTPTRSXP) {
+      fn = new EvalCompiled(fixptfn, env); // working
+  } else {
+      fn = new EvalR(fixptfn, env);
+  }
 
-    EvalBase *fn = NULL;                   
-    if (TYPEOF(fixptfn) == EXTPTRSXP) {                
-        fn = new EvalCompiled(fixptfn, env); // working
-    } else {                                         
-        fn = new EvalR(fixptfn, env); 
+  EvalBase *obj = NULL;
+  if (TYPEOF(objfn) == EXTPTRSXP) {
+      obj = new EvalCompiled(objfn, env); // working
+  } else {
+      obj = new EvalR(objfn, env);
+  }
+
+  int iter = 0, converge = 1, extrap, row_save=0;
+  double sr2, sq2, sv2, srv, alpha;
+  Rcpp::NumericVector lold, lnew(1), p = Rcpp::clone(par);
+  Rcpp::NumericVector p1, q1, p2, q2, p_new, p_aux;
+  Rcpp::NumericVector obj_save(maxiter);
+  Rcpp::NumericMatrix par_save(maxiter, np);
+
+  if (trace) Rcpp::Rcout << "Squarem-1 \n" ;
+
+  lold = obj->eval(p);
+  if (trace) Rcpp::Rcout << "Objective fn:" << lold[0] << "\n";
+
+  obj_save[row_save] = lold[0];
+  for (int i=0; i<np; i++) par_save(row_save, i) = p[i];
+  row_save++;
+
+  while (fn->getNumEvals() <= maxiter){
+    extrap = 1;
+    p1 = fn->eval(p);
+    q1 = p1 - p;
+    sr2 = Rcpp::sum(q1 * q1);
+    if (std::sqrt(sr2) < tol) break;
+
+    p2 = fn->eval(p1);
+    q2 = p2 - p1;
+    sq2 = Rcpp::sum(q2 * q2);
+    if (std::sqrt(sq2) < tol) break;
+
+    sv2 = Rcpp::sum((q2-q1) * (q2-q1));
+    srv = Rcpp::sum(q1 * (q2-q1));
+
+    if (method == 1) alpha = -srv/sv2;
+    else if (method == 2) alpha = -sr2/srv;
+    else alpha = std::sqrt(sr2/sv2);
+
+    alpha = std::max(step_min, std::min(step_max, alpha));
+    p_new = p + 2*alpha * q1 +  std::pow(alpha,2) * (q2-q1);
+    if (std::abs(alpha - 1) > 0.01) {
+      try{
+        p_new = fn->eval(p_new);
+        if (any_naC(p_new))
+          throw "Value Error";
+      } catch(...) {
+        p_new = NA_REAL;
+      }
     }
 
-    EvalBase *obj = NULL;                   
-    if (TYPEOF(objfn) == EXTPTRSXP) {                
-        obj = new EvalCompiled(objfn, env); // working
-    } else {                                         
-        obj = new EvalR(objfn, env); 
+    if (any_naC(p_new)) {
+      p_new = p2;
+      try {lnew = obj->eval(p_new);}
+      catch(...) {lnew(0) = NA_REAL;}
+      if (alpha == step_max)
+        step_max = std::max(step_max0, step_max/mstep);
+      alpha = 1;
+      extrap = 0;
+    } else {
+      if (std::isfinite(objfn_inc)) {
+        try {lnew = obj->eval(p_new);}
+        catch(...) {lnew(0) = NA_REAL;}
+      } else lnew = lold;
+      if (any_naC(lnew) || lnew[0] > lold[0] + objfn_inc){
+        p_new = p2;
+        try {lnew = obj->eval(p_new);}
+        catch(...) {lnew(0) = NA_REAL;}
+        if (alpha == step_max)
+          step_max = std::max(step_max0, step_max/mstep);
+        alpha = 1;
+        extrap = 0;
+      }
     }
 
-    int iter, converge = 1;
-    Rcpp::NumericVector lold, p = Rcpp::clone(par);
+    if (alpha == step_max) step_max = mstep * step_max;
+    if (step_min < 0 && alpha == step_min) step_min = mstep*step_min;
 
-    if (trace) Rcpp::Rcout << "Squarem-1" << endl;
+    p = p_new;
+    if (! any_naC(lnew)) lold = lnew;
+    if (trace) {
+      Rcpp::Rcout << "Objective fn:" << lnew[0];
+      Rcpp::Rcout << " Extrapolation: " << extrap;
+      Rcpp::Rcout << " Steplength: " << alpha << "\n";
+    }
+    if (intermed) {
+      obj_save[row_save] = lnew[0];
+      for (int i=0; i<np; i++) par_save(row_save, i) = p[i];
+      row_save++;
+    }
 
+    iter++;
+  }
+
+  if (fn->getNumEvals() >= maxiter) converge = 0;
+  if (std::isfinite(objfn_inc)) {
     lold = obj->eval(p);
-    if (trace) Rcpp::Rcout << "Objective fn:" << lold[0] << endl;
+  }
 
-    
-
-
-    return Rcpp::List::create(Rcpp::Named("bestmem")   = 123,   // and return a named list with results to R
-                              ); 
+  if (!intermed)
+    return Rcpp::List::create(Rcpp::Named("par")         = p,
+                              Rcpp::Named("value.objfn") = lold,
+                              Rcpp::Named("iter")        = iter,
+                              Rcpp::Named("fpevals")     = fn->getNumEvals(),
+                              Rcpp::Named("objfevals")   = obj->getNumEvals(),
+                              Rcpp::Named("convergence") = converge
+                              );
+  else
+    return Rcpp::List::create(Rcpp::Named("par")           = p,
+                              Rcpp::Named("value.objfn")   = lold,
+                              Rcpp::Named("iter")          = iter,
+                              Rcpp::Named("fpevals")       = fn->getNumEvals(),
+                              Rcpp::Named("objfevals")     = obj->getNumEvals(),
+                              Rcpp::Named("convergence")   = converge,
+                              Rcpp::Named("stored_objval") = obj_save[Rcpp::Range(0,row_save)],
+                              Rcpp::Named("stored_par")    = par_save(Rcpp::Range(0,row_save),
+                                                                      Rcpp::Range(0,np))
+                              );
 }
 
-// if (trace) cat("Squarem-1 \n")
+// [[Rcpp::export]]
+Rcpp::List squarem2_cpp(Rcpp::NumericVector par,
+                        SEXP fixptfn,
+                        const Rcpp::List & ctrl,
+                        SEXP env) {
 
-// if (missing(objfn)) stop("\n squarem2 should be used if objective function is not available \n\n")
+  int method            = Rcpp::as<int>(ctrl["method"]);
+  unsigned long maxiter = Rcpp::as<unsigned long>(ctrl["maxiter"]);
+  double tol            = Rcpp::as<double>(ctrl["tol"]);
+  double step_min       = Rcpp::as<double>(ctrl["step.min0"]);
+  double step_max0      = Rcpp::as<double>(ctrl["step.max0"]);
+  double step_max       = Rcpp::as<double>(ctrl["step.max0"]);
+  double mstep          = Rcpp::as<double>(ctrl["mstep"]);
+  double kr             = Rcpp::as<double>(ctrl["kr"]);
+  int trace             = Rcpp::as<int>(ctrl["trace"]);
 
-// iter <- 1
-// objval <- rep(NA,1)
-// p <- par
+  EvalBase *fn = NULL;
+  if (TYPEOF(fixptfn) == EXTPTRSXP) {
+    fn = new EvalCompiled(fixptfn, env); // working
+  } else {
+    fn = new EvalR(fixptfn, env);
+  }
 
-// lold <- objfn(p, ...)
-// leval <- 1
-// if (trace) cat("Objective fn: ", lold, "\n")
-// feval <- 0
-// conv <- TRUE
-// p.inter <- c(p, lold)
+  int iter = 0, converge = 1, extrap;
+  double sr2, sq2, sv2, srv, alpha, res, parnorm, kres;
+  Rcpp::NumericVector p = Rcpp::clone(par);
+  Rcpp::NumericVector p1, q1, p2, q2, p_new, p_aux;
 
-// while (feval < maxiter) {
-// 	extrap <- TRUE
-// 	p1 <- try(fixptfn(p, ...),silent=TRUE)
-// 	feval <- feval + 1
-// 	if (class(p1) == "try-error" | any(is.nan(unlist(p1)))) stop("Error in function evaluation")
-// 	q1 <- p1 - p
-// 	sr2 <- crossprod(q1)
-// 	if (sqrt(sr2) < tol) break
+  if (trace) Rcpp::Rcout << "Squarem-2 \n" ;
 
-// 	p2 <- try(fixptfn(p1, ...),silent=TRUE)
-// 	feval <- feval + 1
-// 	if (class(p2) == "try-error" | any(is.nan(unlist(p2)))) stop("Error in function evaluation")
+  while (fn->getNumEvals() <= maxiter){
+    extrap = 1;
+    p1 = fn->eval(p);
+    if (any_naC(p1)) break;
+    q1 = p1 - p;
+    sr2 = Rcpp::sum(q1 * q1);
+    if (std::sqrt(sr2) < tol) break;
 
-// 	q2 <- p2 - p1
-// 	sq2 <- sqrt(crossprod(q2))
-// 	if (sq2 < tol) break
-// 	sv2 <- crossprod(q2-q1)
-// 	srv <- crossprod(q1, q2-q1)
+    p2 = fn->eval(p1);
+    if (any_naC(p2)) break;
+    q2 = p2 - p1;
+    sq2 = Rcpp::sum(q2 * q2);
+    res = sq2;
+    if (std::sqrt(sq2) < tol) break;
 
-// 	alpha <- switch(method, -srv/sv2, -sr2/srv, sqrt(sr2/sv2)) 
+    sv2 = Rcpp::sum((q2-q1) * (q2-q1));
+    srv = Rcpp::sum(q1 * (q2-q1));
 
-//  	alpha <- max(step.min, min(step.max, alpha))
-// 	p.new <- p + 2*alpha*q1 + alpha^2*(q2-q1)
-// 	if (abs(alpha - 1) > 0.01 ) {
-// 		p.new <- try(fixptfn(p.new , ...),silent=TRUE)   # stabilization step
-// 		feval <- feval + 1
-// 	}
+    if (method == 1) alpha = -srv/sv2;
+    else if (method == 2) alpha = -sr2/srv;
+    else alpha = std::sqrt(sr2/sv2);
 
-// 	if (class(p.new) == "try-error" | any(is.nan(p.new))) {
-// 	p.new <- p2
-// 	lnew <- try(objfn(p2, ...), silent=TRUE)
-// 	leval <- leval + 1
-// 	if (alpha == step.max) step.max <- max(step.max0, step.max/mstep)
-// 	alpha <- 1
-// 	extrap <- FALSE
-// 	} else {
-// 		if (is.finite(objfn.inc)) {
-// 			lnew <- try(objfn(p.new, ...), silent=TRUE)
-// 			leval <- leval + 1
-// 		} else lnew <- lold
-// 		if (class(lnew) == "try-error" | is.nan(lnew) | 
-// 		(lnew > lold + objfn.inc)) {
-// 			p.new <- p2
-// 			lnew <- try(objfn(p2, ...), silent=TRUE)
-// 			leval <- leval + 1
-// 			if (alpha==step.max) step.max <- max(step.max0, step.max/mstep)
-// 			alpha <- 1
-// 			extrap <- FALSE
-// 		}
-// 	}	
+    alpha = std::max(step_min, std::min(step_max, alpha));
+    p_new = p + 2*alpha * q1 +  std::pow(alpha,2) * (q2-q1);
 
-// 	if (alpha == step.max) step.max <- mstep*step.max
-// 	if (step.min < 0 & alpha == step.min) step.min <- mstep*step.min
+    if (std::abs(alpha - 1) > 0.01) {
+      try{
+        p_aux = fn->eval(p_new);
+        if (any_naC(p_aux))
+          throw "Value Error";
+      } catch(...) {
+        p_aux = NA_REAL;
+      }
 
-// 	p <- p.new
-// 	if (!is.nan(lnew)) lold <- lnew 
-// 	if (trace) cat("Objective fn: ", lnew, "  Extrapolation: ", extrap, "  Steplength: ", alpha, "\n")
-//   if(intermed) p.inter <- rbind(p.inter, c(p, lnew))
+      if (any_naC(p_aux)) {
+        p_new = p2;
+        if (alpha == step_max)
+          step_max = std::max(step_max0, step_max/mstep);
+        alpha = 1;
+        extrap = 0;
+      } else {
+        res = std::sqrt(Rcpp::sum((p_aux - p_new) * (p_aux - p_new)));
+        parnorm = std::sqrt(Rcpp::sum(p2 * p2) / p2.size());
+        kres = kr * (1 + parnorm) + sq2;
+        if (res <= kres) p_new = p_aux;
+        else p_new = p2;
+        if (res > kres) {
+          if (alpha == step_max)
+            step_max = std::max(step_max0, step_max/mstep);
+          alpha = 1;
+          extrap = 0;
+        }
+      }
+    }
 
-// 	iter <- iter+1	
-// }
-// 	if (feval >= maxiter) conv <- FALSE
-// 	if (is.infinite(objfn.inc)) {
-// 		lold <- objfn(p, ...)
-// 		leval <- leval + 1
-// 		}
+    if (alpha == step_max) step_max = mstep * step_max;
+    if (step_min < 0 && alpha == step_min) step_min = mstep*step_min;
 
-// rownames(p.inter) <- NULL
-// if (!intermed) return(list(par=p, value.objfn=lold, iter= iter, fpevals=feval, objfevals = leval, convergence=conv))
-//    else return(list(par=p, value.objfn=lold, iter= iter, fpevals=feval, objfevals = leval, convergence=conv, p.inter=p.inter))
+    p = p_new;
+    if (trace) {
+      Rcpp::Rcout << "Residual:" << res;
+      Rcpp::Rcout << " Extrapolation: " << extrap;
+      Rcpp::Rcout << " Steplength: " << alpha << "\n";
+    }
+
+    iter++;
+  }
+
+  return Rcpp::List::create(Rcpp::Named("par")           = p,
+                            Rcpp::Named("value.objfn")   = NA_REAL,
+                            Rcpp::Named("iter")          = iter,
+                            Rcpp::Named("fpevals")       = fn->getNumEvals(),
+                            Rcpp::Named("objfevals")     = 0,
+                            Rcpp::Named("convergence")   = converge
+                            );
+}

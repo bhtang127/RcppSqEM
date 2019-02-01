@@ -1,3 +1,4 @@
-exportPattern("^[[:alpha:]]+")
 importFrom(Rcpp, evalCpp)
 useDynLib(RcppSqEM, .registration = TRUE)
+export("squarem")
+importFrom("utils", "modifyList")

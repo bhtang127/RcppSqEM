@@ -71,9 +71,7 @@ squarem1 <- function(par, fixptfn, objfn, ... , control=list()) {
   if (!is.null(names(par)))
     names(outC$p) <- names(par)
 
-  outR <- as.list(outC)
-  attr(outR, "class") <- "SqEM"
-  return(outR)
+  return(outC)
 }
 
 ###################################################################
@@ -98,13 +96,11 @@ squarem2 <- function(par, fixptfn, ... , control=list() ) {
 
   env <- list2env(list(...))
 
-  outC <- squarem2_cpp(par, fixptfn, objfn, ctrl, env)
+  outC <- squarem2_cpp(par, fixptfn, ctrl, env)
   if (!is.null(names(par)))
     names(outC$p) <- names(par)
 
-  outR <- as.list(outC)
-  attr(outR, "class") <- "SqEM"
-  return(outR)
+  return(outC)
 }
 
 
