@@ -11,7 +11,7 @@ squarem <- function(par, fixptfn, objfn, ... , control=list()) {
   # Last modified: June 25, 2010
   # Last modified: August 09, 2010
   # Last modified: December 31, 2010
-  #######################################################################
+  ###########################################################################
   #
   # par = starting value of parameter vector
   # fixptfn = fixed-point iteration F(x)
